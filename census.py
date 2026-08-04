@@ -255,37 +255,91 @@ def main():
           f"{' (salts retained)' if args.keep_salts else ''} ...")
 
     parsed = []
+
     for c1, c2 in zip(df["short_composition1"], df["short_composition2"]):
-        m1, s1 = parse_composition_cell(c1, args.keep_salts)
-        m2, s2 = parse_composition_cell(c2, args.keep_salts)
-        mols, full = [], []
-        if m1:
-            mols.append(m1); full.append((m1, s1))
-        if m2:
-            mols.append(m2); full.append((m2, s2))
+
+        full = []
+        mols = []
+
+        # =================== Parse Composition 1 ===================
+        if isinstance(c1, str) and c1.strip():
+
+            groups = re.findall(r"\(([^)]*)\)", c1)
+
+            strength = ""
+
+            if groups:
+                last = re.sub(r"\s+", "", groups[-1])
+                if STRENGTH_TOKEN_RE.match(last):
+                    strength = last
+
+            name = re.sub(r"\([^)]*\)", " ", c1)
+
+            molecule = normalise_molecule(name, args.keep_salts)
+
+            if molecule:
+                strength = normalise_strength(strength)
+                mols.append(molecule)
+                full.append((molecule, strength))
+
+        # =================== Parse Composition 2 ===================
+        if isinstance(c2, str) and c2.strip():
+
+            groups = re.findall(r"\(([^)]*)\)", c2)
+
+            strength = ""
+
+            if groups:
+                last = re.sub(r"\s+", "", groups[-1])
+                if STRENGTH_TOKEN_RE.match(last):
+                    strength = last
+
+            name = re.sub(r"\([^)]*\)", " ", c2)
+
+            molecule = normalise_molecule(name, args.keep_salts)
+
+            if molecule:
+                strength = normalise_strength(strength)
+                mols.append(molecule)
+                full.append((molecule, strength))
+
         parsed.append((mols, full))
 
     df = df.copy()
+
     df["molecules"] = [p[0] for p in parsed]
-    df["mol_sig"] = [" + ".join(sorted(p[0])) for p in parsed]
-    df["full_sig"] = [
-        " + ".join(f"{m}@{s}" for m, s in sorted(p[1])) for p in parsed
+
+    df["mol_sig"] = [
+        " + ".join(sorted(p[0]))
+        for p in parsed
     ]
+
+    df["full_sig"] = [
+        " + ".join(f"{m}@{s}" for m, s in sorted(p[1]))
+        for p in parsed
+    ]
+
     df["n_molecules"] = df["molecules"].str.len()
+
     df["brand_root"] = df["name"].map(brand_root)
 
     ok = df["n_molecules"] > 0
-    print(f"    parsed OK       : {ok.sum():,} ({100*ok.mean():.2f}%)")
+
+    print(f"    parsed OK       : {ok.sum():,} ({100 * ok.mean():.2f}%)")
     print(f"    parse failures  : {(~ok).sum():,}")
     print(f"    single-molecule : {(df['n_molecules'] == 1).sum():,}")
     print(f"    two-molecule FDC: {(df['n_molecules'] == 2).sum():,}")
 
     if (~ok).any():
-        df.loc[~ok, ["name", "short_composition1", "short_composition2"]] \
-          .to_csv(outdir / "parse_failures.csv", index=False)
+        df.loc[
+            ~ok,
+            ["name", "short_composition1", "short_composition2"]
+        ].to_csv(
+            outdir / "parse_failures.csv",
+            index=False
+        )
 
     work = df[ok].copy()
-
     # ---- 4. MOLECULE INVENTORY  (input for ATC coverage) -------------
     inv = (
         work.explode("molecules")
