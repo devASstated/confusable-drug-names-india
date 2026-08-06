@@ -140,21 +140,32 @@ def normalise_strength(raw) -> str:
 
 def parse_composition_cell(cell, keep_salts: bool = False):
     """
-    'Amoxycillin  (500mg)' -> ('amoxicillin', '500mg')
-    Returns (None, None) if the cell is empty or unparseable.
+    'Amoxycillin (500mg)'                      -> ('amoxicillin', '500mg')
+    'Progesterone (Natural Micronized) (25mg)' -> ('progesterone', '25mg')
+    'Doxorubicin (Plain) (50mg)'               -> ('doxorubicin', '50mg')
+
+    Handles ANY number of parenthetical groups. The LAST group is taken as
+    the strength if it looks like one (number + unit); every earlier
+    parenthetical is a descriptive qualifier (Natural Micronized, Plain,
+    Liposomal, rDNA, Vitamin B1, ...) and is stripped from the molecule
+    name — same principle as salt-stripping: we index the base molecule.
     """
     if not isinstance(cell, str) or not cell.strip():
         return None, None
 
-    m = COMPOSITION_RE.match(cell)
-    if not m:
-        return None, None
+    groups = re.findall(r"\(([^)]*)\)", cell)          # every (...) in order
+    strength = ""
+    if groups:
+        last = re.sub(r"\s+", "", groups[-1])
+        if STRENGTH_TOKEN_RE.match(last):              # last group = a strength?
+            strength = last
 
-    mol = normalise_molecule(m.group("mol"), keep_salts)
+    name = re.sub(r"\([^)]*\)", " ", cell)             # drop ALL (...) groups
+    mol = normalise_molecule(name, keep_salts)
     if not mol:
         return None, None
 
-    return mol, normalise_strength(m.group("strength"))
+    return mol, normalise_strength(strength)
 
 
 # def brand_root(name: str) -> str:
@@ -370,6 +381,11 @@ def main():
     ).reset_index()
 
     print(f"    distinct brand roots : {len(summary):,}")
+    # full brand-root inventory — input for the confusability engine (block.py)
+    g.agg(
+        n_products=("name", "size"),
+        compositions=("mol_sig", lambda s: " | ".join(sorted(set(s)))),
+    ).reset_index().to_csv(outdir / "brand_roots.csv", index=False)
 
     # 5a. DIFFERENT MOLECULES under the same brand root — the dangerous case
     mol_collide = summary[summary["n_distinct_molecule_sets"] >= 2] \
