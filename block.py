@@ -77,8 +77,10 @@ def keys_for(root: str):
     sx = jellyfish.soundex(s)            # crude phonetic — over-collides on
     if sx:                               # purpose, to catch distant sound-alikes
         keys.append(("soundex", sx))
-    keys.append(("prefix4", s[:4]))      # shared start
-    keys.append(("suffix4", s[-4:]))     # shared end
+    keys.append(("prefix4", s[:4]))      # shared start — the strongest LASA signal
+    keys.append(("suffix4", s[-4:]))     # shared end — real once dosage debris is
+                                         # cleaned out (catches dopamine/dobutamine).
+                                         # Run clean_roots.py FIRST or this bloats.
     # deletion neighbourhood: name with each single char removed. Two names
     # within edit-distance 1 share at least one of these -> catches olez/olex,
     # the single most common look-alike shape. Capped by length to stay cheap.
@@ -166,7 +168,7 @@ def main():
     report.append(f"avg comparisons / root : {2*n_cand/max(N,1):.1f}")
     report.append("")
     report.append("candidate contribution by pass (before de-dup):")
-    for p in ["metaphone", "dmeta", "nysiis", "prefix4", "suffix4"]:
+    for p in ["metaphone", "dmeta", "nysiis", "soundex", "prefix4", "suffix4", "del1"]:
         report.append(f"    {p:<10} {per_pass.get(p,0):>14,}")
     report.append("")
     report.append(f"non-singleton blocks   : {len(block_sizes):,}")
