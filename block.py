@@ -78,9 +78,14 @@ def keys_for(root: str):
     if sx:                               # purpose, to catch distant sound-alikes
         keys.append(("soundex", sx))
     keys.append(("prefix4", s[:4]))      # shared start — the strongest LASA signal
-    keys.append(("suffix4", s[-4:]))     # shared end — real once dosage debris is
-                                         # cleaned out (catches dopamine/dobutamine).
-                                         # Run clean_roots.py FIRST or this bloats.
+    # suffix4 is length-banded: a shared 4-char ending only blocks names of
+    # similar length. This keeps real same-ending pairs (dopamine/dobutamine,
+    # both ~9 chars) while stopping '-one'/'-ide' from bucketing thousands of
+    # wildly different-length drugs together. Band = len//3 (widths of 3), and
+    # we ALSO emit the neighbouring band so pairs straddling a boundary survive.
+    band = len(s) // 3
+    keys.append(("suffix4", (s[-4:], band)))
+    keys.append(("suffix4", (s[-4:], band + 1)))
     # deletion neighbourhood: name with each single char removed. Two names
     # within edit-distance 1 share at least one of these -> catches olez/olex,
     # the single most common look-alike shape. Capped by length to stay cheap.
