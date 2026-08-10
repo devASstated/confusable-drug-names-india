@@ -19,6 +19,7 @@ Score once with score.py; tune weights here as often as you like.
 import argparse
 import heapq
 import itertools
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -36,20 +37,29 @@ def main():
                     help="weight on edit-distance similarity (default 0.6)")
     ap.add_argument("--chunk", type=int, default=1_000_000)
     ap.add_argument("--out", default="", help="optional CSV to write the top-N to")
-    ap.add_argument("--print", dest="show", type=int, default=40,
-                    help="how many of the top-N to print (default 40)")
+    ap.add_argument("--print", dest="show", type=int, default=0,
+                    help="how many of the top-N to print (default: all of --top)")
+    ap.add_argument("--no-digits", action="store_true",
+                    help="skip pairs where either root contains a digit — hides "
+                         "same-brand dose/variant leftovers so real look-alikes show")
     args = ap.parse_args()
+
+    # default: print exactly as many as we kept (fixes the --top/--print mismatch)
+    show = args.show if args.show > 0 else args.top
 
     wj, we = args.w_jw, args.w_edit
     heap = []                          # min-heap of (score, tiebreak, row-tuple)
     counter = itertools.count()        # stable tiebreak so tuples never compare
     seen = 0
+    has_digit = re.compile(r"\d").search
 
     for chunk in pd.read_csv(args.scored_csv, chunksize=args.chunk):
         chunk["score"] = wj * chunk["jw"] + we * chunk["edit_sim"]
         for a, b, jw, es, sc in zip(chunk.root_a, chunk.root_b,
                                     chunk.jw, chunk.edit_sim, chunk.score):
             seen += 1
+            if args.no_digits and (has_digit(str(a)) or has_digit(str(b))):
+                continue               # hide dose/variant leftovers from the view
             item = (sc, next(counter), (a, b, jw, es, sc))
             if len(heap) < args.top:
                 heapq.heappush(heap, item)
@@ -57,9 +67,10 @@ def main():
                 heapq.heapreplace(heap, item)
 
     top = [h[2] for h in sorted(heap, key=lambda h: h[0], reverse=True)]
-    print(f"scanned {seen:,} pairs   weights: jw={wj} edit={we}   top {len(top)}")
+    flt = "  (no-digits filter)" if args.no_digits else ""
+    print(f"scanned {seen:,} pairs   weights: jw={wj} edit={we}   top {len(top)}{flt}")
     print(f"\n  {'root_a':<20}{'root_b':<20}{'jw':>7}{'edit':>7}{'score':>8}")
-    for a, b, jw, es, sc in top[:args.show]:
+    for a, b, jw, es, sc in top[:show]:
         print(f"  {str(a)[:19]:<20}{str(b)[:19]:<20}{jw:>7.3f}{es:>7.3f}{sc:>8.3f}")
 
     if args.out:
