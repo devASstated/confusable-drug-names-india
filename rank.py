@@ -70,13 +70,13 @@ def main():
 
     flt = "  (no-digits)" if args.no_digits else ""
     print(f"scanned {seen:,} pairs   weights jw={wj} edit={we}   top {len(top)}{flt}")
-    print(f"\n  {'root_a':<18}{'root_b':<18}{'jw':>6}{'edit':>6}{'dice':>6}{'comb':>7}{'kbig':>7}")
+    print(f"\n  {'root_a':<51}{'root_b':<51}{'jw':>6}{'edit':>6}{'dice':>6}{'comb':>7}{'kbig':>7}")
     for (a, b, jw, es, dc, sc), k in list(zip(top, kb))[:show]:
         dcs = f"{dc:>6.2f}" if dc == dc else "   -  "
         kbs = f"{k:>7.2f}" if k == k else "   -   "
-        print(f"  {str(a)[:17]:<18}{str(b)[:17]:<18}{jw:>6.2f}{es:>6.2f}{dcs}{sc:>7.3f}{kbs}")
+        print(f"  {str(a)[:50]:<51}{str(b)[:50]:<51}{jw:>6.2f}{es:>6.2f}{dcs}{sc:>7.3f}{kbs}")
     print("\n  note: jw/edit/dice/comb are 0-1 look-alike scores; kbig (k-bigram)")
-    print("  is on its own compressed scale — compare its RANK order, not its level.")
+    print("  is on its own compressed scale - compare its RANK order, not its level.")
 
     if args.out:
         pd.DataFrame([(a, b, jw, es, dc, sc, k) for (a, b, jw, es, dc, sc), k in zip(top, kb)],
