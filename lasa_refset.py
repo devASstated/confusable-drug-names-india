@@ -4,7 +4,11 @@ lasa_refset.py — build one clean evaluation set from the ISMP + IMSN files.
 
 Pools three published sources into a single deduped table:
     name_a, name_b, label, source
-      label 1 = expert-confirmed LASA pair (ISMP 2023 + IMSN SALAD Bar 2024)
+      label 1 = LASA pair published by a medication-safety body (ISMP 2023 +
+                IMSN SALAD Bar 2024). NOTE these lists mix pairs CONFIRMED
+                confused in reported errors with pairs judged to have the
+                POTENTIAL for confusion — so label=1 means "expert-listed",
+                not "observed error".
       label 0 = synthetic negative (random non-confusable pair, from the ML file)
 
 Normalisation (these lists are messy):
