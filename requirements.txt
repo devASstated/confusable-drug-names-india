@@ -1,9 +1,19 @@
-certifi==2026.7.22
-charset-normalizer==3.4.9
-idna==3.18
-numpy==2.5.1
+# LASA confusable-drug-name screening — direct dependencies only.
+# Transitive deps (certifi, urllib3, six, python-dateutil, ...) are resolved
+# by pip and deliberately not pinned here. Do not regenerate with pip freeze.
+
+# data handling — used by every pipeline stage
 pandas==3.0.5
-python-dateutil==2.9.0.post0
+numpy==2.5.1
+
+# string similarity + phonetic blocking keys — block.py, score.py, evaluate.py
+jellyfish==1.2.1        # Jaro-Winkler, Levenshtein, NYSIIS, Soundex, Metaphone
+Metaphone==0.6          # doublemetaphone — block.py's 'dmeta' pass
+
+# ATC lookup via the RxNav / RxClass API — atc_coverage.py
 requests==2.34.2
-six==1.17.0
-urllib3==2.7.0
+
+# required only by block_parameter_search.py (parameter-tuning experiment,
+# not part of the core pipeline)
+RapidFuzz==3.14.6
+phonetics==1.0.5
