@@ -363,6 +363,26 @@ def main():
     )
     inv.to_csv(outdir / "molecules.csv", index=False)
 
+    # ---- 4a. PRODUCT -> MOLECULES PROVENANCE MAP ---------------------
+    # One row per product, carrying the links every downstream stage needs:
+    #   product name -> brand_root -> its molecules -> its manufacturer
+    # Two things depend on this file:
+    #   * atc_coverage.py --products : the TRUE product-level coverage figure
+    #     ("what share of products have ALL ingredients mapped"), which cannot
+    #     be computed from molecules.csv alone because that file aggregates
+    #     away which molecules belong to which product.
+    #   * provenance for the divergence (D) stage and the intra-brand filter:
+    #     blocking/scoring work on cleaned root STRINGS, so without this map a
+    #     candidate pair cannot be traced back to its products, compositions
+    #     or manufacturer.
+    prov_cols = ["name", "brand_root", "mol_sig"]
+    if "manufacturer_name" in work.columns:
+        prov_cols.append("manufacturer_name")
+    (work[prov_cols]
+        .rename(columns={"mol_sig": "molecules"})
+        .to_csv(outdir / "product_molecules.csv", index=False))
+    print(f"    product provenance : {len(work):,} rows -> product_molecules.csv")
+
     print(f"\n[4] MOLECULE INVENTORY")
     print(f"    distinct molecules : {len(inv):,}   -> molecules.csv")
     print(f"    (this is your ATC-lookup input list)")
@@ -453,6 +473,8 @@ def main():
     print(f"\n{'=' * 68}")
     print(f"  Files written to {outdir.resolve()}/")
     print(f"    molecules.csv            -> feed to ATC lookup")
+    print(f"    product_molecules.csv    -> product->root->molecules->manufacturer")
+    print(f"                                (atc_coverage.py --products; provenance)")
     print(f"    collisions_molecule.csv  -> THE CENSUS")
     print(f"    collisions_strength.csv")
     print(f"    parse_failures.csv       -> review, then extend the tables")

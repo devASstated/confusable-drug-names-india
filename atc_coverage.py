@@ -17,6 +17,26 @@ Two hops per molecule:
 Results are cached to disk, so re-running is cheap and you can
 interrupt with Ctrl-C without losing work.
 
+TWO MEASUREMENT CAVEATS (both matter when quoting these numbers)
+
+  1. COVERAGE IS REPORTED TWO WAYS, and they answer different questions:
+       - ingredient-occurrence coverage (always computed): of all
+         ingredient-slots across the namespace, weighted by how many
+         products each molecule appears in, what share map to ATC?
+       - TRUE product-level coverage (only with --products): of all
+         PRODUCTS, what share have EVERY ingredient mapped?
+     The second is strictly lower and is the honest figure for severity
+     work, because a product is only fully classifiable if ALL of its
+     ingredients map. The first was previously mislabelled as the second.
+
+  2. THE INGREDIENT INVENTORY ITSELF IS INCOMPLETE. The source A-Z dataset
+     carries at most TWO composition fields, and measurement shows products
+     whose own names declare 3+ strengths while the composition records
+     fewer — i.e. ingredients are silently truncated. Any coverage figure
+     here is therefore computed over an ingredient set that is known to be
+     missing ingredients for an unquantified share of products. Treat these
+     percentages as upper bounds on true classifiability.
+
 Usage:
     python atc_coverage.py results/molecules.csv
     python atc_coverage.py results/molecules.csv --outdir results
@@ -116,6 +136,14 @@ def main():
     ap.add_argument("--cache", default="results/atc_cache.json")
     ap.add_argument("--limit", type=int, default=0,
                     help="only process the top N molecules (for a quick test)")
+    ap.add_argument("--products", default="",
+                    help="optional CSV with ONE ROW PER PRODUCT and a column "
+                         "listing that product's molecules (see --mol-col). "
+                         "Enables the TRUE product-level coverage figure "
+                         "(share of products whose ingredients ALL map).")
+    ap.add_argument("--mol-col", default="molecules",
+                    help="column in --products holding the molecule list, "
+                         "separated by '+' or '|' (default: molecules)")
     args = ap.parse_args()
 
     outdir = Path(args.outdir)
@@ -199,10 +227,14 @@ def main():
     n_rx = res.rxcui.notna().sum()
     n_atc = (res.n_atc_codes > 0).sum()
 
-    # weight by how many products each molecule appears in — this is the
-    # number that actually matters for your severity coverage
-    tot_prod = res.product_count.sum()
-    cov_prod = res.loc[res.n_atc_codes > 0, "product_count"].sum()
+    # ---- ingredient-occurrence coverage (weighted by product frequency) --
+    # NOTE this is NOT "products whose molecules all map". Each product with
+    # k ingredients contributes k ingredient-occurrences, and a product can be
+    # counted in the numerator through a mapped ingredient even when another
+    # of its ingredients is unmapped. It is a frequency-weighted INGREDIENT
+    # coverage statistic. The true product-level figure needs --products.
+    tot_occ = res.product_count.sum()
+    cov_occ = res.loc[res.n_atc_codes > 0, "product_count"].sum()
 
     print(f"\n{'=' * 68}")
     print("  RESULTS")
@@ -216,9 +248,62 @@ def main():
     print(f"    of which approximate     : "
           f"{res.match_method.str.startswith('approx').sum():,}")
 
-    print(f"\n[PRODUCT-WEIGHTED COVERAGE]  <- the number that matters")
-    print(f"  products whose molecules all map: {cov_prod:,} of {tot_prod:,} "
-          f"({100*cov_prod/max(tot_prod,1):.1f}%)")
+    print(f"\n[INGREDIENT-OCCURRENCE COVERAGE]  (frequency-weighted)")
+    print(f"  mapped ingredient-occurrences: {cov_occ:,} of {tot_occ:,} "
+          f"({100*cov_occ/max(tot_occ,1):.1f}%)")
+    print(f"  Reading: of every ingredient-slot in the namespace (a 2-ingredient")
+    print(f"  product contributes 2), this share maps to ATC. It is NOT the share")
+    print(f"  of products that are fully classifiable — see below.")
+
+    # ---- TRUE product-level coverage (needs a product -> molecules file) ----
+    if args.products:
+        mapped = set(res.loc[res.n_atc_codes > 0, "molecule"].astype(str).str.lower())
+        known = set(res["molecule"].astype(str).str.lower())
+        prod = pd.read_csv(args.products, dtype=str, keep_default_na=False)
+        if args.mol_col not in prod.columns:
+            print(f"\n  [!] --products given but column '{args.mol_col}' not found; "
+                  f"columns are {list(prod.columns)}")
+        else:
+            import re as _re
+            n_all, n_part, n_none, n_unknown = 0, 0, 0, 0
+            for cell in prod[args.mol_col]:
+                mols = [m.strip().lower() for m in _re.split(r"\s*[|+]\s*", str(cell))
+                        if m.strip()]
+                if not mols:
+                    continue
+                if any(m not in known for m in mols):
+                    n_unknown += 1            # molecule never attempted in this run
+                    continue
+                hits = sum(1 for m in mols if m in mapped)
+                if hits == len(mols):
+                    n_all += 1
+                elif hits:
+                    n_part += 1
+                else:
+                    n_none += 1
+            tot = n_all + n_part + n_none
+            print(f"\n[TRUE PRODUCT-LEVEL COVERAGE]  <- the honest severity number")
+            if tot:
+                print(f"  products where ALL ingredients map : {n_all:,} of {tot:,} "
+                      f"({100*n_all/tot:.1f}%)")
+                print(f"  partially mapped (some, not all)   : {n_part:,}  "
+                      f"({100*n_part/tot:.1f}%)  <- NOT fully classifiable")
+                print(f"  no ingredient mapped               : {n_none:,}  "
+                      f"({100*n_none/tot:.1f}%)")
+            if n_unknown:
+                print(f"  skipped (a molecule not in this run): {n_unknown:,}")
+            print(f"  This is strictly lower than the occurrence figure above, and")
+            print(f"  it is the number to quote for divergence/severity coverage.")
+    else:
+        print(f"\n[TRUE PRODUCT-LEVEL COVERAGE]  not computed")
+        print(f"  Pass --products <csv> (one row per product, a column listing its")
+        print(f"  molecules) to get the share of products whose ingredients ALL map.")
+        print(f"  Without it, only the occurrence figure above is available, and it")
+        print(f"  OVERSTATES how many products are fully classifiable.")
+
+    print(f"\n  [caveat] the source dataset truncates composition to two fields;")
+    print(f"  products with 3+ ingredients lose some. Every figure above is an")
+    print(f"  UPPER BOUND on true classifiability.")
 
     if n_atc:
         lvl1 = (res[res.n_atc_codes > 0]
