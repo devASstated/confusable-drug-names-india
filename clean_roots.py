@@ -1,34 +1,19 @@
 #!/usr/bin/env python3
 """
-clean_roots.py — blocker-specific root cleaner.
+clean_roots.py — blocker-specific root cleaner (v4).
 
-Produces the blocking representation from census.py's brand_root. Feeds the
-BLOCKER only; the census brand_root is left untouched.
+v4 closes the last strength/form leak (1,357 roots still carried 'mg'-type
+tails, which floated same-brand dose-variants to the top of the ranking):
+  - strengths in grams ('1gm', '1.5gm', '1gm/0.5gm') were missed because
+    the unit list had 'g' but not 'gm'.
+  - odd units (iu, au, miu, lb, million/spores) and truncated form words
+    (gelatin, softgel, disintegrating, vaginal, dusting, wash...) survived.
 
-Design, in the order the rules apply:
-  - strip parentheses, glue "1 gm" -> "1gm", delete strength chains
-    ("5mg/500mg/30mg") and concentrations ("40mg/ml", "100iu/ml")
-  - pop the trailing form/strength tail, right to left. A digit-bearing token
-    counts as a strength only when its alphabetic content is <=2 characters,
-    so 'maxx-2m' (the real brand "G Maxx-2M") survives while '2m'/'100iu' go
-  - 'soft' is popped only after gelatin/gel/capsule; standalone it is brand
-    text ("I Soft" is a marketed eye drop)
-  - BACK-OFF GUARD: never strip a name out of existence. If the result cannot
-    survive the filter, restore brand-meaningful tokens; if the name was built
-    entirely from form-like words ("MD Plus", "New NP"), keep the head plus
-    non-debris tokens rather than truncating or merging distinct brands
-
-Survival filter: >=2 alphanumerics and >=1 letter. The threshold is 2, not 3,
-because two-character roots ('ad', 'af', 'cv') are real marketed brands and
-SHORT names carry MORE confusability risk, not less.
-
-Also writes root_map.csv (brand_root -> clean_root, kept), completing the
-provenance chain back to products, compositions and manufacturer.
-
-Known limitations: hyphenated letter+digit suffixes are retained ('achol-d3'
-is a MOLECULE, 'acmeglim-m2' is a STRENGTH — indistinguishable without domain
-knowledge); brand-meaningful words (Duo, Kid, Plus, Free) are protected at the
-cost of a small residual digit leak; ~20 single-character roots are excluded.
+Core rule change: pop any trailing token that CONTAINS A DIGIT (every
+strength does — 1gm, 100iu, 200lb, 40iu/ml — regardless of unit), as long
+as we're still in the tail. Stop at the first pure-alphabetic brand token,
+so digit-bearing BRANDS (a2, b12) are only stripped if they're the trailing
+dose, never the name. Feeds the BLOCKER only; census brand_root untouched.
 """
 import re, sys, pandas as pd
 from pathlib import Path
@@ -90,7 +75,39 @@ STRENGTH_CHAIN = re.compile(
 CONCENTRATION = re.compile(rf"\b\d[\d.]*\s*{UNIT}\s*/\s*{UNIT}\b", re.IGNORECASE)
 HAS_DIGIT = re.compile(r"\d")
 
-def clean_root(name: str) -> str:
+# Unambiguous PRESENTATION words. Only these are stripped in light mode (used
+# for composition-split groups), because in that context every other token may
+# be the one distinguishing a product from its sibling: 'SF' (sugar free),
+# 'CV' (clavulanate), 'DS', 'MR', 'XT' all mark genuinely different products.
+CORE_FORM = {
+    "tablet","tablets","tab","tabs","capsule","capsules","capsules","syrup",
+    "suspension","solution","injection","injecti","injectio","infusion","cream",
+    "ointment","lotion","paste","powder","granules","drops","drop","spray",
+    "inhaler","sachet","patch","suppository","pessary","pessaries","vial",
+    "ampoule","bottle","tube","liquid","shampoo","elixir","emulsion","lozenges",
+    "combipack","combikit","rotacap","respicap","transcaps","transhaler",
+    "instacap","cartridge","penfill","kwikpen","flexpen","syringe","chewable",
+    "effervescent","transdermal","topical","ophthalmic","sublingual",
+    "mouthwash","gargle","mango","pineapple","strawberry","peppermint",
+    "vanilla","flavour","flavor","chocolate","butterscotch","softgels",
+    "pellets","multidose","prefilled","pre-filled",
+}
+
+def clean_root(name: str, strip_modifiers: bool = True) -> str:
+    """Blocking representation of a brand root.
+
+    strip_modifiers=True  (default) - full cleaning: strength, form words AND
+                          modifiers ('plus', 'sr', 'ds') are removed.
+    strip_modifiers=False - LIGHT cleaning, used for composition-split groups:
+                          strength and form words are still removed, but every
+                          modifier is KEPT because it is the token that
+                          distinguishes one product from its sibling
+                          ('moxi' vs 'moxi plus'). Reaching for the raw
+                          original instead would drag strength chains into the
+                          blocking root ('vent sf 50 mcg/500 mcg'), which then
+                          scores a near-identical pair as dissimilar and
+                          corrupts C.
+    """
     if not isinstance(name, str):
         return ""
     s = name.lower().strip()
@@ -117,9 +134,32 @@ def clean_root(name: str) -> str:
         return len(re.sub(r"[^a-z]", "", t)) <= MAX_STRENGTH_LETTERS
 
     def strippable(t):
+        if not strip_modifiers:
+            # LIGHT MODE: strip only strengths and unambiguous presentation
+            # words. Everything else may be the distinguishing token.
+            return (t in CORE_FORM
+                    or STRENGTH_RE.match(t)
+                    or (looks_like_strength(t) and len(toks) > 1))
         return (t in FORM_WORDS or t in MODIFIERS
                 or STRENGTH_RE.match(t)
                 or (looks_like_strength(t) and len(toks) > 1))
+
+    if not strip_modifiers:
+        # LIGHT MODE takes a different path entirely. The right-to-left strip
+        # halts at the first token it cannot remove, stranding debris behind it
+        # ('furacef 250 cv' keeps the 250 because 'cv' blocks the pop). Since
+        # strengths and unambiguous presentation words are NEVER the token that
+        # distinguishes one product from its sibling, remove them wherever they
+        # occur and keep everything else in order.
+        # NOTE: looks_like_strength() is deliberately NOT used here. It flags
+        # any token with a digit and <=2 letters, which is safe when stripping
+        # only from the TAIL but destructive when filtering anywhere: 'a2b',
+        # 'o2', 'p2i' are BRANDS, and removing them left roots like 'a' and
+        # 'm'. Only tokens that actually parse as a strength (STRENGTH_RE, i.e.
+        # leading digits) are removed here.
+        light = [t for t in toks
+                 if not (t in CORE_FORM or STRENGTH_RE.match(t))]
+        return " ".join(light) if light else " ".join(toks)
 
     original = list(toks)                # keep, so we can back off if we overstrip
 
@@ -143,8 +183,8 @@ def clean_root(name: str) -> str:
     # Second pass: a SHORT (<=2 char) trailing alpha fragment like 'so','p','f'
     # is a truncated form word ONLY if a strength/form tail still sits behind
     # it. Peek: if popping it EXPOSES more strippable tail, it was debris.
-    while len(toks) >= 2 and toks[-1].isalpha() and len(toks[-1]) <= 2 \
-            and strippable(toks[-2]):
+    while strip_modifiers and len(toks) >= 2 and toks[-1].isalpha() \
+            and len(toks[-1]) <= 2 and strippable(toks[-2]):
         toks.pop()                       # drop the fragment
         while toks and strippable(toks[-1]):   # then continue the normal strip
             toks.pop()
@@ -250,13 +290,72 @@ if __name__ == "__main__":
     dropped = (~keep).sum()
     changed = (df["clean_root"] != before).sum()
     nb = before.nunique()
-    out_roots = df.loc[keep, "clean_root"].drop_duplicates()
+    # ---- COMPOSITION-AWARE DEDUPLICATION -------------------------------
+    # Collapsing every brand_root that cleans to the same string erases a
+    # whole class of pair before blocking can see it. Example:
+    #     "pan 40" (pantoprazole)              -> "pan"
+    #     "pan d"  (pantoprazole+domperidone)  -> "pan"
+    # Both become ONE string, block.py only pairs DIFFERENT strings, so this
+    # pair can never exist in candidate_pairs.csv. Yet it is exactly a pair the
+    # system should flag: similar names (high C), different drugs (non-zero D).
+    #
+    # This is the BRAND NAME EXTENSION hazard - reusing a known proprietary
+    # name for a product with a different active ingredient. ISMP has issued
+    # repeated alerts on it (Triaminic/Triaminic Fever Reducer, Maalox/Maalox
+    # Total Relief, Kaopectate antidiarrheal/stool softener), the FDA advises
+    # against the practice, and IMSN flags it too. Indian brand families use it
+    # heavily (Telma / Telma AM / Telma H).
+    #
+    # Rule: group the surviving rows by clean_root. If every brand_root in the
+    # group has the SAME composition, collapse as before (they are genuine dose
+    # or presentation variants). If compositions DIFFER, emit the ORIGINAL
+    # brand_roots instead - the only representation that keeps them distinct,
+    # and one where the distinguishing token ('d', '40') is the information
+    # that matters.
+    kept_df = df.loc[keep].copy()
+    if "compositions" in df.columns:
+        kept_df["_comp"] = df.loc[keep, "compositions"].fillna("").astype(str)
+        per_root = kept_df.groupby("clean_root")["_comp"].nunique()
+        split_roots = set(per_root[per_root > 1].index)
+        # For split groups use a LIGHT clean of the original, not the raw
+        # original: strength/form debris would otherwise reach the blocker and
+        # make a near-identical pair score as dissimilar.
+        kept_df["block_root"] = [
+            clean_root(br, strip_modifiers=False) if cr in split_roots else cr
+            for br, cr in zip(kept_df["brand_root"].astype(str),
+                              kept_df["clean_root"].astype(str))]
+        # Where light cleaning collapses two members to the SAME string, the
+        # names are genuinely identical and only the composition differs -
+        # that is the X/X case, which needs its own detection stream rather
+        # than a candidate pair (C = 1.0 by definition, rank by D).
+        _lg = kept_df[kept_df["clean_root"].isin(split_roots)]
+        n_xx = int((_lg.groupby("block_root")["_comp"].nunique() > 1).sum())
+        n_split = len(split_roots)
+        n_extra_rows = int(kept_df["clean_root"].isin(split_roots).sum())
+    else:
+        print("  [!] no 'compositions' column — falling back to plain dedup; "
+              "brand-name-extension pairs will be lost")
+        kept_df["block_root"] = kept_df["clean_root"]
+        n_split, n_extra_rows = 0, 0
+
+    out_roots = kept_df["block_root"].drop_duplicates()
     na = out_roots.nunique()
     print(f"rows                 : {len(df):,}")
     print(f"roots changed        : {changed:,} ({100*changed/len(df):.1f}%)")
     print(f"dropped (<{MIN_ALNUM} alnum)   : {dropped:,}")
     print(f"distinct roots before: {nb:,}")
     print(f"distinct roots after : {na:,}  ({nb-na:,} fewer)")
+    if "compositions" in df.columns:
+        plain = kept_df["clean_root"].nunique()
+        print(f"\n  composition-aware dedup:")
+        print(f"    clean roots with 2+ DIFFERENT compositions : {n_split:,}")
+        print(f"    brand roots kept distinct because of that  : {n_extra_rows:,}")
+        print(f"    (plain dedup would have given {plain:,} roots; "
+              f"+{na-plain:,} preserved)")
+        print(f"    these are BRAND NAME EXTENSION candidates — same brand,")
+        print(f"    different active ingredients — a documented LASA hazard")
+        print(f"    of which SAME name / different composition (X/X case,")
+        print(f"    needs its own stream, C=1.0 by definition)  : {n_xx:,}")
     out = Path(src).with_name("brand_roots_clean.csv")
     out_roots.rename("brand_root").to_frame().to_csv(out, index=False)
     print(f"wrote {na:,} clean roots -> {out}")
@@ -275,12 +374,16 @@ if __name__ == "__main__":
         "clean_root": df["clean_root"],
         "kept": keep,
     })
+    # the string actually handed to the blocker (differs from clean_root where
+    # composition-aware dedup preserved the original brand_root)
+    mp["block_root"] = mp["clean_root"]
+    mp.loc[kept_df.index, "block_root"] = kept_df["block_root"].values
     map_out = Path(src).with_name("root_map.csv")
     mp.to_csv(map_out, index=False)
 
     # how many distinct brand roots collapsed onto one blocking string?
     collapsed = (mp[mp.kept]
-                 .groupby("clean_root")["brand_root"].nunique())
+                 .groupby("block_root")["brand_root"].nunique())
     n_merged = int((collapsed > 1).sum())
     print(f"wrote {len(mp):,} root mappings -> {map_out}")
     print(f"  clean roots formed from 2+ distinct brand roots: {n_merged:,}")
