@@ -23,8 +23,13 @@ THE PASSES
     metaphone  — a phonetic code               (sound-alike)
     dmeta      — double-metaphone primary code (sound-alike, alt spellings)
     nysiis     — a second phonetic algorithm   (sound-alike, more recall)
+    soundex    — crude phonetic, over-collides on purpose (distant sound-alikes)
     prefix4    — first 4 letters               (look-alike, shared start)
-    suffix4    — last 4 letters                (look-alike, shared end)
+    suffix4    — last 4 letters, length-banded (look-alike, shared end)
+    del1       — deletion neighbourhood        (look-alike, 1-char difference)
+
+    Short alphanumeric roots ('b12', 'a-3') take a fallback route that keys on
+    the alphanumeric form and skips the phonetic passes — see keys_for().
 
 OUTPUT
     candidate_pairs.csv  — the pairs the scoring stage will consume
@@ -58,12 +63,67 @@ def letters_only(root: str) -> str:
     return re.sub(r"[^a-z]", "", str(root).lower())
 
 
+def alnum_only(root: str) -> str:
+    """Strip to lowercase letters AND digits: 'b-12' -> 'b12', 'a 3' -> 'a3'.
+    Used only by the short-root fallback in keys_for()."""
+    return re.sub(r"[^a-z0-9]", "", str(root).lower())
+
+
+# Trailing marketing/presentation modifiers. clean_roots.py now PRESERVES these
+# whenever they distinguish products with different compositions ("moxi" vs
+# "moxi plus"), which is correct — but it means thousands of roots end in the
+# same modifier. suffix4 then keys them all identically: a single
+# suffix4:('plus', 4) block held 2,873 roots and emitted ~4.1M pairs on its own,
+# almost all of them junk ("moxi plus" and "zocef plus" are unrelated brands
+# that merely share a marketing word). Length-banding cannot help because
+# 'plus' is exactly 4 characters.
+#
+# suffix4 exists to catch shared PHARMACEUTICAL endings (-amine, -olol); a
+# shared modifier is not one. So the suffix key is computed on the root with a
+# trailing modifier removed. prefix4 and del1 still key on the full form, so no
+# genuine pair is lost — only the mega-block disappears.
+SUFFIX_STOP = {"plus", "forte", "fort", "total", "active", "sr", "er", "xr",
+               "cr", "dr", "od", "mr", "pr", "md", "dt", "dp", "ls", "ds",
+               "xl", "lb", "dry", "kid", "duo", "cv"}
+
+
+def suffix_basis(root: str) -> str:
+    """letters_only(), minus a trailing modifier word, for the suffix4 key."""
+    toks = re.sub(r"[^a-z0-9\s\-]", " ", str(root).lower()).split()
+    while len(toks) > 1 and toks[-1] in SUFFIX_STOP:
+        toks.pop()
+    return letters_only(" ".join(toks)) or letters_only(root)
+
+
 def keys_for(root: str):
     """Return the set of blocking keys for one name, tagged by pass name.
     Empty/degenerate keys are dropped so we never bucket on ''. """
     s = letters_only(root)
-    if len(s) < 2:                       # 1-letter roots have no useful key
-        return []
+
+    # SHORT ALPHANUMERIC FALLBACK
+    # letters_only() deletes digits, so a real marketed brand like 'b12', 'a-3'
+    # or 'l250' collapses to a single letter, fails the >=2 test, and is
+    # emitted with NO KEYS AT ALL — silently excluded from blocking even though
+    # clean_roots.py deliberately KEPT it. That defeats the reason the cleaner's
+    # survival threshold was lowered to 2 alphanumerics: short names carry MORE
+    # confusability risk, not less, so dropping them is the wrong trade.
+    # For these, build keys from the ALPHANUMERIC form instead.
+    # Phonetic encoders are deliberately skipped: Metaphone('b12') encodes only
+    # the 'b' and would bucket the root with every B-name in the namespace —
+    # thousands of junk candidates for no recall. Character keys only.
+    if len(s) < 2:
+        a = alnum_only(root)
+        if len(a) < 2:
+            return []                    # genuinely nothing to key on
+        band = len(a) // 3
+        keys = [("prefix4", a[:4]),
+                ("suffix4", (a[-4:], band)),
+                ("suffix4", (a[-4:], band + 1))]
+        if 3 <= len(a) <= 14:            # 'l250'/'l500' both yield del1 'l50'
+            for k in range(len(a)):
+                keys.append(("del1", a[:k] + a[k + 1:]))
+        return keys
+
     keys = []
     mp = jellyfish.metaphone(s)
     if mp:
@@ -83,9 +143,10 @@ def keys_for(root: str):
     # both ~9 chars) while stopping '-one'/'-ide' from bucketing thousands of
     # wildly different-length drugs together. Band = len//3 (widths of 3), and
     # we ALSO emit the neighbouring band so pairs straddling a boundary survive.
-    band = len(s) // 3
-    keys.append(("suffix4", (s[-4:], band)))
-    keys.append(("suffix4", (s[-4:], band + 1)))
+    sb = suffix_basis(root)              # drops a trailing 'plus'/'forte'/'sr'
+    band = len(sb) // 3
+    keys.append(("suffix4", (sb[-4:], band)))
+    keys.append(("suffix4", (sb[-4:], band + 1)))
     # deletion neighbourhood: name with each single char removed. Two names
     # within edit-distance 1 share at least one of these -> catches olez/olex,
     # the single most common look-alike shape. Capped by length to stay cheap.
