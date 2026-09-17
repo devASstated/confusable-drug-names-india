@@ -32,9 +32,12 @@ WHAT IT REPORTS
   3. CORRELATION between measures. A new measure that correlates ~0.95 with
      edit distance carries no new information however good its AUC looks.
 
-  4. BLEND CONTRIBUTION. Held-out AUC of a logistic combination WITH and
-     WITHOUT each measure. This is the real test of whether a measure earns
-     its place: does adding it improve the combination?
+  4. BLEND CONTRIBUTION, cross-validated on the SAME folds. Held-out AUC of a
+     logistic combination with and without each measure, computed per fold and
+     PAIRED (same fold both ways), so the delta comes with its own spread. A
+     delta smaller than its std is not evidence of anything. This is the real
+     test of whether a measure earns its place — standalone AUC cannot show
+     whether a measure is merely duplicating one already in the blend.
 
 CAVEAT THAT GOVERNS EVERY NUMBER BELOW
     The refset's negatives are SYNTHETIC RANDOM pairs, not expert-confirmed
@@ -166,16 +169,39 @@ def make_kbigram(train_idx, a, b, y, rank=16, epochs=25, lr=0.3, l2=1e-2, seed=1
     return lambda i: align(A[i], B[i], F)
 
 
-LEARNED = {"kbigram": make_kbigram}
-# To add LUMERA later: give it a make_lumera(train_idx, a, b, y) -> scorer(i)
-# and register it here. It is then held to exactly this standard.
+def make_lumera(train_idx, a, b, y, rank=8, epochs=30, lr=0.4, l2=1e-2,
+                gap_open=0.6, gap_ext=0.15, seed=1):
+    """Train the LUMERA character kernel on train_idx ONLY; return a scorer."""
+    from lumera_train import cseq, align, train_kernel
+    A = [cseq(x) for x in a]
+    B = [cseq(z) for z in b]
+    M = train_kernel(A, B, y, train_idx, rank=rank, epochs=epochs, lr=lr,
+                     l2=l2, gap_open=gap_open, gap_ext=gap_ext, init_seed=seed)
+    return lambda i: align(A[i], B[i], M, gap_open, gap_ext)
+
+
+LEARNED = {"kbigram": make_kbigram, "lumera": make_lumera}
+# Any new learned measure registers here as make_X(train_idx, a, b, y) ->
+# scorer(i), and is then held to exactly the same standard: retrained inside
+# every fold, scored on both split views, checked for redundancy.
 
 
 # ----------------------------------------------------------------------
 def run_view(view, a, b, y, folds_fn, args, fixed_scores):
+    """Standalone AUC and blend contribution, both over the SAME folds.
+
+    The learned measures are retrained once per fold and the result feeds both
+    tables, so the blend delta is cross-validated on exactly the folds the AUCs
+    came from rather than being read off a single split.
+    """
     print(f"\n{'='*70}\n  {view}\n{'='*70}")
-    res = {m: [] for m in list(FIXED) + ([] if args.skip_learned else list(LEARNED))}
+    learned = [] if args.skip_learned else list(LEARNED)
+    res = {m: [] for m in list(FIXED) + learned}
+    blend = {"base": []}
+    for m in learned:
+        blend[m] = []
     n_test = []
+
     for rep in range(args.repeats):
         folds = folds_fn(rep)
         for f in range(args.folds):
@@ -184,20 +210,55 @@ def run_view(view, a, b, y, folds_fn, args, fixed_scores):
             if len(te) < 10 or len(set(y[te])) < 2:
                 continue
             n_test.append(len(te))
+
             for m, v in fixed_scores.items():
                 res[m].append(auc(y[te], v[te]))
-            if not args.skip_learned:
-                for m, mk in LEARNED.items():
-                    sc = mk(tr, a, b, y)
-                    res[m].append(auc(y[te], np.array([sc(i) for i in te])))
-        print(f"  repeat {rep+1}/{args.repeats} done")
-    print(f"\n  mean test-fold size: {int(np.mean(n_test)) if n_test else 0:,}")
+
+            # learned measures: train ONCE per fold, reuse for AUC and blend
+            fold_scores = {}
+            for m in learned:
+                sc = LEARNED[m](tr, a, b, y)
+                col = np.array([sc(i) for i in range(len(y))])
+                fold_scores[m] = col
+                res[m].append(auc(y[te], col[te]))
+
+            # blend, cross-validated on this same fold
+            Xb = np.column_stack([fixed_scores[m] for m in FIXED])
+            base_auc = logistic_heldout_auc(Xb, y, tr, te)
+            blend["base"].append(base_auc)
+            for m in learned:
+                Xw = np.column_stack(
+                    [fixed_scores[k] for k in FIXED] + [fold_scores[m]])
+                blend[m].append(logistic_heldout_auc(Xw, y, tr, te))
+
+        print(f"  repeat {rep+1}/{args.repeats} done "
+              f"({args.folds} folds each)")
+
+    print(f"\n  folds: {args.folds} x {args.repeats} repeats = "
+          f"{len(n_test)} evaluations   mean test-fold size: "
+          f"{int(np.mean(n_test)) if n_test else 0:,}")
     print(f"\n  {'measure':<16}{'AUC mean':>10}{'std':>9}")
     print(f"  {'-'*35}")
     for m, arr in res.items():
         if arr:
             arr = np.array(arr)
             print(f"  {m:<16}{arr.mean():>10.4f}{arr.std():>9.4f}")
+
+    if learned and blend["base"]:
+        base = np.array(blend["base"])
+        print(f"\n  BLEND CONTRIBUTION (same folds, so the delta is")
+        print(f"  cross-validated rather than read off one split)")
+        print(f"\n  {'+'.join(FIXED)}")
+        print(f"    {'without':<18}{base.mean():>9.4f}  +/- {base.std():.4f}")
+        for m in learned:
+            w = np.array(blend[m])
+            d = w - base                    # paired: same fold, same split
+            # a delta is only meaningful against its own spread across folds
+            print(f"    {'with '+m:<18}{w.mean():>9.4f}  +/- {w.std():.4f}"
+                  f"   delta {d.mean():+.4f} +/- {d.std():.4f}")
+        print(f"\n  The delta is PAIRED (same fold with and without), so its")
+        print(f"  spread is the honest uncertainty. A delta smaller than its")
+        print(f"  own std is not evidence the measure earns its place.")
     return res
 
 
@@ -251,21 +312,6 @@ def main():
     print("\n  A measure correlating ~0.95 with an existing one carries little")
     print("  new information, however good its standalone AUC looks.")
 
-    if not args.skip_learned:
-        print(f"\n{'='*70}\n  BLEND CONTRIBUTION (held-out)\n{'='*70}")
-        f0 = stratified_folds(y, args.folds, 0)
-        te, tr = f0[0], np.concatenate(f0[1:])
-        base = list(FIXED)
-        Xb = np.column_stack([all_scores[m] for m in base])
-        a0 = logistic_heldout_auc(Xb, y, tr, te)
-        print(f"\n  {'+'.join(base)}")
-        print(f"    without : {a0:.4f}")
-        for m in LEARNED:
-            Xw = np.column_stack([all_scores[k] for k in base + [m]])
-            aw = logistic_heldout_auc(Xw, y, tr, te)
-            print(f"    with {m:<10}: {aw:.4f}   ({aw-a0:+.4f})")
-        print("\n  A positive delta is the only evidence that a measure earns")
-        print("  its place. A near-zero delta means it is redundant.")
     print()
 
 
