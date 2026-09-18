@@ -13,9 +13,25 @@ It answers three separate questions:
      (counted by splitting each composition field on '+' — the dataset's own
       separator for multi-ingredient fields)
   2. How many products use BOTH fields (i.e. sit at the schema's edge)?
-  3. Is there evidence of TRUNCATION — products where the name implies more
-     ingredients than the composition fields carry (e.g. name says 'Triple',
-     'Trio', '3', or the composition ends mid-token)?
+  3. Is there evidence of TRUNCATION — products whose own NAME implies more
+     ingredients than the composition fields record?
+
+TWO DETECTORS, AND THEY BOUND THE ANSWER FROM OPPOSITE SIDES
+  Test A (keyword) only fires on names containing 'Trio', 'Triple' and the
+  like. Most 3+ ingredient products do not advertise it that way, so Test A
+  is a FLOOR — it misses far more than it catches.
+
+  Test B (strength pattern) fires whenever a name carries more strength values
+  than the composition records ingredients. It catches far more, but it
+  OVER-counts: strengths written per unit volume look like two values when
+  they are one concentration. 'Zoxil CV 400mg/5ml/57mg/5ml' is a TWO
+  ingredient product, not four. Test B therefore reports both a raw count and
+  a concentration-corrected count; even corrected, treat it as a CEILING,
+  because a name can carry repeated strengths for other reasons.
+
+  The honest figure lies between Test A and corrected Test B. What is not in
+  doubt is the qualitative finding: a hard cliff at exactly two ingredients
+  across a quarter-million Indian products is a schema cap, not a market fact.
 
 USAGE
     python fdc_check.py data/A_Z_medicines_dataset_of_india.csv
@@ -120,9 +136,9 @@ def main():
                 print(f"         c2: {f2[:80]}")
 
     # ---- TEST A: names whose WORDS hint at 3+ ingredients -------------
+    suspects = []
     if has_name:
         hint = re.compile(r"\b(trio|triple|tri|quadr|forte\s*plus|3\s*in\s*1|4\s*in\s*1)\b", re.I)
-        suspects = []
         for r in df.itertuples(index=False):
             nm = str(getattr(r, args.name_col, ""))
             if hint.search(nm):
@@ -144,26 +160,51 @@ def main():
     # if a name carries >=3 strength values but composition parses to <=2
     # ingredients, that row is truncated — regardless of any keyword.
     if has_name:
-        # a strength value: number (with optional decimal) + unit
+        # A strength value: number (optional decimal) + unit.
         STRENGTH = re.compile(r"\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|iu|%|units?)\b", re.I)
+        # A CONCENTRATION is one strength expressed per unit volume:
+        # '400mg/5ml', '0.291mg/5ml'. The naive counter sees two values and
+        # infers two ingredients, which is wrong — suspensions and syrups are
+        # routinely labelled this way. Collapse each to a single value before
+        # counting, and report both numbers so the over-count is visible.
+        CONC = re.compile(
+            r"\d+(?:\.\d+)?\s*(?:mg|mcg|g|iu|units?)\s*/\s*\d+(?:\.\d+)?\s*ml\b",
+            re.I)
+
+        def declared_strengths(name):
+            """(raw count, concentration-corrected count)."""
+            raw = len(STRENGTH.findall(name))
+            n_conc = len(CONC.findall(name))
+            # each concentration contributed 2 matches but represents 1 value
+            return raw, raw - n_conc
+
         trunc, by_declared = [], Counter()
+        raw_only = 0                       # flagged by raw count, not corrected
         for r in df.itertuples(index=False):
             nm = str(getattr(r, args.name_col, ""))
-            declared = len(STRENGTH.findall(nm))
-            if declared < 3:
-                continue
+            raw, declared = declared_strengths(nm)
             tot = len(ingredients(getattr(r, args.c1, ""))) + \
                   len(ingredients(getattr(r, args.c2, "")))
+            if raw >= 3 and tot < raw and declared < 3:
+                raw_only += 1             # only the naive counter would flag it
+            if declared < 3:
+                continue
             if tot < declared:
                 trunc.append((declared, tot, nm))
                 by_declared[declared] += 1
 
-        print(f"\n[TEST B — STRENGTH-PATTERN DETECTOR]  <- the strong estimate")
+        print(f"\n[TEST B — STRENGTH-PATTERN DETECTOR]  <- the UPPER bound")
         print(f"  A name carrying N strength values (e.g. '40mg/5mg/12.5mg')")
-        print(f"  implies N active ingredients. Rows where the name declares 3+")
-        print(f"  strengths but the composition records FEWER are truncated.\n")
+        print(f"  usually implies N active ingredients. Rows where the name")
+        print(f"  declares 3+ and the composition records FEWER are truncated.")
+        print(f"  Strengths written per unit volume ('400mg/5ml') are collapsed")
+        print(f"  to one value first — otherwise a 2-ingredient suspension looks")
+        print(f"  like a 4-ingredient product.\n")
         print(f"  products with >=3 strengths in the name, composition shows fewer:")
         print(f"    {len(trunc):,}  ({100*len(trunc)/n:.2f}% of all products)")
+        if raw_only:
+            print(f"    (a naive counter would also have flagged {raw_only:,} more")
+            print(f"     that are only per-volume concentrations — excluded here)")
         if n2:
             print(f"    = {100*len(trunc)/n2:.1f}% of the {n2:,} products sitting at the 2-field cap")
         if by_declared:
@@ -179,13 +220,24 @@ def main():
             print("    none — no strength-pattern evidence of truncation")
 
         print(f"\n[VERDICT]")
-        if len(trunc) > 0:
-            print(f"  TRUNCATION CONFIRMED on {len(trunc):,} products by direct")
-            print(f"  self-contradiction (the product's own name declares more")
-            print(f"  ingredients than its composition fields record).")
-            print(f"  This is a FLOOR, not a ceiling: products that omit strengths")
-            print(f"  from the name cannot be detected this way, so the true")
-            print(f"  truncated population is larger.")
+        if n3 == 0 and len(trunc) > 0:
+            print(f"  TRUNCATION IS REAL. Zero products record 3+ ingredients,")
+            print(f"  yet {len(trunc):,} carry 3+ strength values in their own name.")
+            print(f"  A product contradicting itself within one row is not a")
+            print(f"  market fact; it is a schema cap.")
+            print(f"\n  HOW MANY is bounded, not known:")
+            print(f"    lower  {len(suspects) if has_name else 0:,}  (Test A — only names that say")
+            print(f"           'Trio'/'Triple'; most FDCs do not advertise it)")
+            print(f"    upper  {len(trunc):,}  (Test B — corrected for per-volume")
+            print(f"           concentrations, but a name may repeat strengths for")
+            print(f"           other reasons)")
+            print(f"  Quote the RANGE. Neither endpoint is the count.")
+            print(f"\n  The unambiguous cases are tablets with no per-volume")
+            print(f"  denominator: a name listing five distinct strengths while the")
+            print(f"  composition holds two cannot be explained any other way.")
+        elif len(trunc) > 0:
+            print(f"  {len(trunc):,} products declare more strengths than their")
+            print(f"  composition records. Treat as an upper bound (see above).")
         else:
             print("  No self-contradicting rows found.")
 
