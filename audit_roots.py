@@ -7,6 +7,27 @@ corrupts blocking, scoring and ranking together. Finding problems by chance
 (as with "A Plus") is not a process. This reads root_map.csv and sorts every
 mapping into named SUSPICION CLASSES so you review by category, not by row.
 
+IT AUDITS block_root, NOT clean_root.
+    Since composition-aware dedup, the string handed to the blocker is
+    block_root; it differs from clean_root wherever a clean_root covered two
+    or more DIFFERENT compositions and the members were kept apart. Auditing
+    clean_root there inspects a value the pipeline discards.
+    This matters more than it sounds. When the composition change first
+    landed, an audit of clean_root returned class counts IDENTICAL to the
+    previous run — which read as "nothing broke" but actually meant "this tool
+    is not measuring what changed". The real defects (a brand reduced to 'a',
+    'ls plus' rebuilt as 'plus', two unrelated brands colliding on 'l') were
+    found by reading root_map.csv by hand. An audit that reports clean while
+    brands are being destroyed is worse than no audit.
+    Older root_map.csv files without a block_root column fall back to
+    clean_root, with a warning.
+
+EXAMPLES ARE SAMPLED RANDOMLY, not taken from the top.
+    The first N rows of a class are alphabetically clustered and therefore
+    unrepresentative — 'a 3', 'a-3', 'a2' tell you about one corner of the
+    namespace. --seed makes a sample reproducible so a finding can be quoted
+    and re-checked; vary it to probe different parts of a class.
+
 Each class answers a different failure question:
   A DROPPED        - which names never reach the blocker at all?
   B HEAVY SHRINK   - which names lost most of their content?
@@ -18,6 +39,11 @@ Each class answers a different failure question:
   G NEAR-MERGE     - brand roots differing ONLY by a modifier that merged
                      (intra-brand collapse: expected, but verify)
   H ODD CHARS      - leftover punctuation / suspicious residue
+  I COMP SPLIT     - block_root differs from clean_root: the row was kept
+                     distinct because its clean_root covered 2+ compositions
+                     (brand-name-extension candidates). Check these carry no
+                     strength/form debris — they are light-cleaned, not fully
+                     cleaned, so a leak here reaches the blocker.
 
 USAGE
     python audit_roots.py results/root_map.csv
@@ -27,6 +53,7 @@ import argparse
 import re
 from collections import defaultdict
 
+import numpy as np
 import pandas as pd
 
 FORM_WORDS = {
@@ -52,6 +79,10 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("root_map", nargs="?", default="results/root_map.csv")
     ap.add_argument("--examples", type=int, default=15)
+    ap.add_argument("--seed", type=int, default=0,
+                    help="seed for the random example sample; vary it to probe "
+                         "different parts of a class, quote it to make a "
+                         "finding re-checkable")
     ap.add_argument("--out", default="", help="write all flagged rows to this CSV")
     args = ap.parse_args()
 
@@ -60,6 +91,17 @@ def main():
         if c not in df.columns:
             raise SystemExit(f"expected column '{c}' in {args.root_map}")
     df["kept_b"] = df["kept"].astype(str).str.lower().isin(("true", "1", "yes"))
+
+    # block_root is what the blocker actually receives. Audit that.
+    if "block_root" in df.columns:
+        df["audit_root"] = df["block_root"]
+        n_split = int((df["block_root"] != df["clean_root"]).sum())
+    else:
+        print("  [!] no block_root column — this root_map.csv predates")
+        print("      composition-aware dedup. Falling back to clean_root, which")
+        print("      is NOT what the blocker consumes. Regenerate it.")
+        df["audit_root"] = df["clean_root"]
+        n_split = 0
     N = len(df)
     E = args.examples
     flags = defaultdict(list)      # class -> list of (brand_root, clean_root, note)
@@ -70,15 +112,27 @@ def main():
     print(f"\nmappings         : {N:,}")
     print(f"reached blocker  : {df.kept_b.sum():,}")
     print(f"dropped          : {(~df.kept_b).sum():,}")
+    print(f"auditing column  : "
+          f"{'block_root (what the blocker receives)' if 'block_root' in df.columns else 'clean_root (FALLBACK)'}")
+    if n_split:
+        print(f"  of which kept distinct by composition-aware dedup: {n_split:,}")
 
     # ---- A. DROPPED ---------------------------------------------------
     dropped = df[~df.kept_b]
     for r in dropped.itertuples():
-        flags["A_DROPPED"].append((r.brand_root, r.clean_root, "never reaches blocker"))
+        flags["A_DROPPED"].append((r.brand_root, r.audit_root, "never reaches blocker"))
+
+    # I. composition-split rows: light-cleaned, so verify no debris got through
+    if "block_root" in df.columns:
+        for r in df[df.kept_b].itertuples():
+            if str(r.block_root) != str(r.clean_root):
+                flags["I_COMP_SPLIT"].append(
+                    (r.brand_root, r.block_root,
+                     f"kept distinct (clean_root was '{r.clean_root}')"))
 
     # ---- B/C/D/E/H over kept rows -------------------------------------
     for r in df[df.kept_b].itertuples():
-        br, cr = str(r.brand_root), str(r.clean_root)
+        br, cr = str(r.brand_root), str(r.audit_root)
         lb, lc = n_letters(br), n_letters(cr)
         toks_b = br.lower().split()
         toks_c = cr.lower().split()
@@ -108,7 +162,7 @@ def main():
 
     # ---- F. big merges -------------------------------------------------
     kept = df[df.kept_b]
-    grp = kept.groupby("clean_root")["brand_root"].apply(lambda s: sorted(set(s)))
+    grp = kept.groupby("audit_root")["brand_root"].apply(lambda s: sorted(set(s)))
     merges = grp[grp.map(len) > 1].sort_values(key=lambda s: s.map(len),
                                                ascending=False)
     for cr, members in merges.items():
@@ -129,8 +183,10 @@ def main():
                     (members[0], members[1], f"differ only by {extra}"))
 
     # ---- REPORT --------------------------------------------------------
+    rng = np.random.default_rng(args.seed)
     order = ["A_DROPPED", "B_HEAVY_SHRINK", "C_DIGIT_LEAK", "D_TAIL_LEAK",
-             "E_MODIFIER_LOSS", "F_BIG_MERGE", "G_NEAR_MERGE", "H_ODD_CHARS"]
+             "E_MODIFIER_LOSS", "F_BIG_MERGE", "G_NEAR_MERGE", "H_ODD_CHARS",
+             "I_COMP_SPLIT"]
     meaning = {
         "A_DROPPED":       "excluded from the namespace entirely — confirm none is a real brand",
         "B_HEAVY_SHRINK":  "lost >50% of letters — check the cleaner didn't eat the name",
@@ -140,6 +196,7 @@ def main():
         "F_BIG_MERGE":     "many distinct brands collapsed to one blocking string",
         "G_NEAR_MERGE":    "two brands merged that differ only by a modifier (intra-brand)",
         "H_ODD_CHARS":     "leftover punctuation or whitespace residue",
+        "I_COMP_SPLIT":    "kept distinct for a differing composition — check for debris",
     }
     print(f"\n{'class':<18}{'count':>9}   what it means")
     print("-" * 74)
@@ -151,10 +208,13 @@ def main():
         if not rows:
             continue
         print(f"\n{'=' * 74}\n  {k}  ({len(rows):,})  — {meaning[k]}\n{'=' * 74}")
-        for a, b, note in rows[:E]:
+        shown = rows if len(rows) <= E else \
+            [rows[i] for i in sorted(rng.choice(len(rows), E, replace=False))]
+        for a, b, note in shown:
             print(f"    {str(a)[:34]:<36} -> {str(b)[:26]:<28} {note}")
         if len(rows) > E:
-            print(f"    ... and {len(rows)-E:,} more")
+            print(f"    ... {len(rows)-E:,} more not shown "
+                  f"(random sample, seed {args.seed})")
 
     if args.out:
         recs = [{"class": k, "brand_root": a, "clean_root": b, "note": n}
