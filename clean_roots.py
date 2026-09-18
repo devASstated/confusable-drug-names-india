@@ -53,6 +53,9 @@ FORM_WORDS = {
     "chewing","mixed","gargle","multidose","prefilled","pre-filled","filled",
     # --- v7: last vocabulary gaps from the final audit sample
     "softgels","pellets","scrub","pearls","eazy",
+    # --- v8: flavours found blocking the strip in the block_root audit
+    # ("clarigard 125mg dry syrup banana" halted at 'banana')
+    "banana","raspberry","apple","cola","bubblegum","kesar","elaichi",
 }
 # Words that can carry BRAND meaning ("A Plus", "X Forte" may be the real name).
 # These are still stripped normally, but the back-off guard MAY restore one if
@@ -91,6 +94,7 @@ CORE_FORM = {
     "mouthwash","gargle","mango","pineapple","strawberry","peppermint",
     "vanilla","flavour","flavor","chocolate","butterscotch","softgels",
     "pellets","multidose","prefilled","pre-filled",
+    "banana","raspberry","apple","cola","bubblegum","kesar","elaichi",
 }
 
 def clean_root(name: str, strip_modifiers: bool = True) -> str:
@@ -112,7 +116,11 @@ def clean_root(name: str, strip_modifiers: bool = True) -> str:
         return ""
     s = name.lower().strip()
     s = re.sub(r"\(.*?\)", " ", s)
-    s = re.sub(rf"(\d[\d.]*)\s*({UNIT})", r"\1\2", s)   # glue "1 gm" -> "1gm"
+    # \b matters: without it the alternation's short units eat the start of a
+    # longer word — 'g' turns "100 granules" into "100granules", "100 grams"
+    # into "100grams", 'l' turns "5 litres" into "5litres". The mangled token
+    # is then not recognised as a strength and survives into the blocking root.
+    s = re.sub(rf"(\d[\d.]*)\s*({UNIT})\b", r"\1\2", s)  # glue "1 gm" -> "1gm"
     s = STRENGTH_CHAIN.sub(" ", s)                       # delete "5mg/500mg/30mg"
     s = CONCENTRATION.sub(" ", s)                        # delete "40mg/ml"
     s = re.sub(r"[^a-z0-9\s\-/+.]", " ", s)
