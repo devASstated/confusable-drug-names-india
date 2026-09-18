@@ -29,7 +29,22 @@ TWO MEASUREMENT CAVEATS (both matter when quoting these numbers)
      work, because a product is only fully classifiable if ALL of its
      ingredients map. The first was previously mislabelled as the second.
 
-  2. THE INGREDIENT INVENTORY ITSELF IS INCOMPLETE. The source A-Z dataset
+  2. NOT EVERY MAPPING IS EQUALLY TRUSTWORTHY. A molecule reaches an ATC code
+     either by an EXACT RxNorm name match or by an APPROXIMATE one, and the
+     approximate route is unthresholded — RxNav's similarity score has no
+     documented scale, so the top candidate is taken whatever it scores. An
+     approximate match that happens to carry an ATC code currently counts as
+     covered exactly like an exact one.
+     That is tolerable for an exploratory coverage figure. It is NOT tolerable
+     for divergence (D), where a WRONG therapeutic class is worse than a
+     missing one: a missing class is a known gap, a wrong class is confident
+     nonsense that propagates into a priority score. Coverage is therefore
+     reported twice — exact-only (the trustworthy floor) and including
+     approximate (the optimistic ceiling) — and every approximate mapping is
+     written to molecules_atc_approx.csv for hand audit before D uses any of
+     it.
+
+  3. THE INGREDIENT INVENTORY ITSELF IS INCOMPLETE. The source A-Z dataset
      carries at most TWO composition fields, and measurement shows products
      whose own names declare 3+ strengths while the composition records
      fewer — i.e. ingredients are silently truncated. Any coverage figure
@@ -48,6 +63,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -219,8 +235,21 @@ def main():
         })
 
     res = pd.DataFrame(recs)
+
+    # Trust tiers. 'approximate' is not a synonym for 'mapped': the match was
+    # made by fuzzy name lookup with no threshold, so it may be a different
+    # drug entirely. Keep the tiers separate from here on.
+    is_exact = res.match_method == "exact"
+    is_approx = res.match_method.str.startswith("approx")
+    has_atc = res.n_atc_codes > 0
+    res["trust"] = np.where(~has_atc, "unmapped",
+                     np.where(is_exact, "exact", "approx_unvalidated"))
+
     res.to_csv(outdir / "molecules_atc.csv", index=False)
-    res[res.n_atc_codes == 0].to_csv(outdir / "molecules_no_atc.csv", index=False)
+    res[~has_atc].to_csv(outdir / "molecules_no_atc.csv", index=False)
+    approx_rows = res[has_atc & is_approx].sort_values("product_count",
+                                                       ascending=False)
+    approx_rows.to_csv(outdir / "molecules_atc_approx.csv", index=False)
 
     # ---- REPORT ------------------------------------------------------
     n = len(res)
@@ -248,16 +277,34 @@ def main():
     print(f"    of which approximate     : "
           f"{res.match_method.str.startswith('approx').sum():,}")
 
+    n_ex = int((res.trust == "exact").sum())
+    n_ap = int((res.trust == "approx_unvalidated").sum())
+    print(f"\n[MAPPING TRUST]")
+    print(f"  exact RxNorm name match    : {n_ex:,}")
+    print(f"  approximate, UNVALIDATED   : {n_ap:,}  "
+          f"({100*n_ap/max(n_ex+n_ap,1):.1f}% of all mappings)")
+    print(f"  -> molecules_atc_approx.csv, audit before D uses these")
+    if n_ap:
+        print(f"  largest by product count:")
+        for r in approx_rows.head(6).itertuples():
+            print(f"    {r.product_count:>6,}  {str(r.molecule)[:30]:<32}"
+                  f"{r.match_method}")
+
+    cov_occ_ex = res.loc[has_atc & is_exact, "product_count"].sum()
     print(f"\n[INGREDIENT-OCCURRENCE COVERAGE]  (frequency-weighted)")
-    print(f"  mapped ingredient-occurrences: {cov_occ:,} of {tot_occ:,} "
-          f"({100*cov_occ/max(tot_occ,1):.1f}%)")
+    print(f"  exact only        : {cov_occ_ex:,} of {tot_occ:,} "
+          f"({100*cov_occ_ex/max(tot_occ,1):.1f}%)   <- trustworthy floor")
+    print(f"  incl. approximate : {cov_occ:,} of {tot_occ:,} "
+          f"({100*cov_occ/max(tot_occ,1):.1f}%)   <- optimistic ceiling")
     print(f"  Reading: of every ingredient-slot in the namespace (a 2-ingredient")
     print(f"  product contributes 2), this share maps to ATC. It is NOT the share")
     print(f"  of products that are fully classifiable — see below.")
 
     # ---- TRUE product-level coverage (needs a product -> molecules file) ----
     if args.products:
-        mapped = set(res.loc[res.n_atc_codes > 0, "molecule"].astype(str).str.lower())
+        mapped = set(res.loc[has_atc, "molecule"].astype(str).str.lower())
+        mapped_exact = set(res.loc[has_atc & is_exact, "molecule"]
+                           .astype(str).str.lower())
         known = set(res["molecule"].astype(str).str.lower())
         prod = pd.read_csv(args.products, dtype=str, keep_default_na=False)
         if args.mol_col not in prod.columns:
@@ -292,7 +339,22 @@ def main():
                       f"({100*n_none/tot:.1f}%)")
             if n_unknown:
                 print(f"  skipped (a molecule not in this run): {n_unknown:,}")
-            print(f"  This is strictly lower than the occurrence figure above, and")
+            # same walk, but only exact mappings count as mapped
+            e_all = 0
+            for cell in prod[args.mol_col]:
+                ms = [m.strip().lower() for m in _re.split(r"\s*[|+]\s*", str(cell))
+                      if m.strip()]
+                if ms and all(m in known for m in ms) and \
+                        all(m in mapped_exact for m in ms):
+                    e_all += 1
+            if tot:
+                print(f"\n  EXACT MAPPINGS ONLY (the number D can rely on today):")
+                print(f"    products where ALL ingredients map : {e_all:,} of {tot:,} "
+                      f"({100*e_all/tot:.1f}%)")
+                print(f"    the gap to the figure above is carried by unvalidated")
+                print(f"    approximate matches — audit them and it closes, or it")
+                print(f"    does not and that gap was never real coverage.")
+            print(f"\n  This is strictly lower than the occurrence figure above, and")
             print(f"  it is the number to quote for divergence/severity coverage.")
     else:
         print(f"\n[TRUE PRODUCT-LEVEL COVERAGE]  not computed")
@@ -331,6 +393,8 @@ def main():
     print(f"\n{'=' * 68}")
     print(f"  molecules_atc.csv     -> full mapping")
     print(f"  molecules_no_atc.csv  -> the gap, review by hand")
+    print(f"  molecules_atc_approx.csv -> UNVALIDATED fuzzy matches; audit")
+    print(f"     these before any of it feeds divergence")
     print("=" * 68)
 
 
