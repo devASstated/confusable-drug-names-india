@@ -139,33 +139,47 @@ def normalise_strength(raw) -> str:
 
 
 def parse_composition_cell(cell, keep_salts: bool = False):
-    """
-    'Amoxycillin (500mg)'                      -> ('amoxicillin', '500mg')
-    'Progesterone (Natural Micronized) (25mg)' -> ('progesterone', '25mg')
-    'Doxorubicin (Plain) (50mg)'               -> ('doxorubicin', '50mg')
+    """One composition cell -> [(molecule, strength), ...].
 
-    Handles ANY number of parenthetical groups. The LAST group is taken as
-    the strength if it looks like one (number + unit); every earlier
-    parenthetical is a descriptive qualifier (Natural Micronized, Plain,
-    Liposomal, rDNA, Vitamin B1, ...) and is stripped from the molecule
-    name — same principle as salt-stripping: we index the base molecule.
+    'Amoxycillin (500mg)'                      -> [('amoxicillin', '500mg')]
+    'Progesterone (Natural Micronized) (25mg)' -> [('progesterone', '25mg')]
+    'Amoxycillin (500mg) + Clavulanic Acid (125mg)'
+                                               -> [('amoxicillin', '500mg'),
+                                                   ('clavulanic acid', '125mg')]
+
+    Returns a LIST because a single cell can hold several ingredients joined by
+    '+'. On the present dataset no cell does (measured: 0 of 253,973), so this
+    changes nothing today — but fdc_check.py already treats '+' as the
+    multi-ingredient separator, and two different definitions of "ingredient"
+    in one project is a bug waiting for the first dataset that uses it. If a
+    combination cell ever arrives and this still returned a single molecule,
+    the inventory would silently record "amoxicillin + clavulanic acid" as one
+    substance and the divergence stage would inherit that error.
+
+    Handles ANY number of parenthetical groups per part. The LAST group is the
+    strength if it looks like one (number + unit); earlier parentheticals are
+    descriptive qualifiers (Natural Micronized, Plain, Liposomal, rDNA, ...)
+    and are stripped — same principle as salt-stripping, we index the base
+    molecule.
     """
     if not isinstance(cell, str) or not cell.strip():
-        return None, None
+        return []
 
-    groups = re.findall(r"\(([^)]*)\)", cell)          # every (...) in order
-    strength = ""
-    if groups:
-        last = re.sub(r"\s+", "", groups[-1])
-        if STRENGTH_TOKEN_RE.match(last):              # last group = a strength?
-            strength = last
-
-    name = re.sub(r"\([^)]*\)", " ", cell)             # drop ALL (...) groups
-    mol = normalise_molecule(name, keep_salts)
-    if not mol:
-        return None, None
-
-    return mol, normalise_strength(strength)
+    out = []
+    for part in re.split(r"\s*\+\s*", cell):
+        if not part.strip():
+            continue
+        groups = re.findall(r"\(([^)]*)\)", part)      # every (...) in order
+        strength = ""
+        if groups:
+            last = re.sub(r"\s+", "", groups[-1])
+            if STRENGTH_TOKEN_RE.match(last):          # last group = a strength?
+                strength = last
+        name = re.sub(r"\([^)]*\)", " ", part)         # drop ALL (...) groups
+        mol = normalise_molecule(name, keep_salts)
+        if mol:
+            out.append((mol, normalise_strength(strength)))
+    return out
 
 
 # def brand_root(name: str) -> str:
@@ -269,50 +283,11 @@ def main():
 
     for c1, c2 in zip(df["short_composition1"], df["short_composition2"]):
 
-        full = []
-        mols = []
-
-        # =================== Parse Composition 1 ===================
-        if isinstance(c1, str) and c1.strip():
-
-            groups = re.findall(r"\(([^)]*)\)", c1)
-
-            strength = ""
-
-            if groups:
-                last = re.sub(r"\s+", "", groups[-1])
-                if STRENGTH_TOKEN_RE.match(last):
-                    strength = last
-
-            name = re.sub(r"\([^)]*\)", " ", c1)
-
-            molecule = normalise_molecule(name, args.keep_salts)
-
-            if molecule:
-                strength = normalise_strength(strength)
-                mols.append(molecule)
-                full.append((molecule, strength))
-
-        # =================== Parse Composition 2 ===================
-        if isinstance(c2, str) and c2.strip():
-
-            groups = re.findall(r"\(([^)]*)\)", c2)
-
-            strength = ""
-
-            if groups:
-                last = re.sub(r"\s+", "", groups[-1])
-                if STRENGTH_TOKEN_RE.match(last):
-                    strength = last
-
-            name = re.sub(r"\([^)]*\)", " ", c2)
-
-            molecule = normalise_molecule(name, args.keep_salts)
-
-            if molecule:
-                strength = normalise_strength(strength)
-                mols.append(molecule)
-                full.append((molecule, strength))
+        # Both cells go through the SAME parser — the inline copies that used
+        # to live here had drifted into a third definition of "ingredient".
+        full = (parse_composition_cell(c1, args.keep_salts)
+                + parse_composition_cell(c2, args.keep_salts))
+        mols = [m for m, _ in full]
 
         parsed.append((mols, full))
 
