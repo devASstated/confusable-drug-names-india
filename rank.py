@@ -31,7 +31,14 @@ def main():
     ap.add_argument("--print", dest="show", type=int, default=0,
                     help="how many to print (default: all of --top)")
     ap.add_argument("--no-digits", action="store_true",
-                    help="skip pairs where either root has a digit (hides dose variants)")
+                    help="DIAGNOSTIC VIEW ONLY. Skips pairs where either root "
+                         "contains a digit. Written when the cleaner leaked "
+                         "strength into roots, so digit-bearing roots were "
+                         "mostly dose-variant debris. That is no longer true: "
+                         "the cleaner now deliberately preserves digit-bearing "
+                         "BRANDS ('g maxx-2m', 'a1a', 'uprise-d3'), and this "
+                         "filter cannot tell them from strength debris - it "
+                         "hides both. Never use it as safety logic.")
     ap.add_argument("--no-kbigram", action="store_true",
                     help="skip the k-bigram column (faster)")
     args = ap.parse_args()
@@ -39,7 +46,7 @@ def main():
     wj, we = args.w_jw, args.w_edit
     has_digit = re.compile(r"\d").search
 
-    heap = []; counter = itertools.count(); seen = 0
+    heap = []; counter = itertools.count(); seen = 0; skipped = 0
     have_dice = None
     for chunk in pd.read_csv(args.scored_csv, chunksize=args.chunk):
         if have_dice is None:
@@ -50,6 +57,7 @@ def main():
                                         chunk.edit_sim, dice_col, chunk.combined):
             seen += 1
             if args.no_digits and (has_digit(str(a)) or has_digit(str(b))):
+                skipped += 1        # counted, because this hides real brands too
                 continue
             item = (sc, next(counter), (a, b, jw, es, dc, sc))
             if len(heap) < args.top:
@@ -68,8 +76,11 @@ def main():
         except Exception as e:
             print(f"[k-bigram unavailable: {e}]")
 
-    flt = "  (no-digits)" if args.no_digits else ""
-    print(f"scanned {seen:,} pairs   weights jw={wj} edit={we}   top {len(top)}{flt}")
+    print(f"scanned {seen:,} pairs   weights jw={wj} edit={we}   top {len(top)}")
+    if args.no_digits:
+        print(f"  --no-digits hid {skipped:,} pairs "
+              f"({100*skipped/max(seen,1):.1f}%), including any involving a "
+              f"digit-bearing BRAND. Diagnostic view, not a safety filter.")
     print(f"\n  {'root_a':<51}{'root_b':<51}{'jw':>6}{'edit':>6}{'dice':>6}{'comb':>7}{'kbig':>7}")
     for (a, b, jw, es, dc, sc), k in list(zip(top, kb))[:show]:
         dcs = f"{dc:>6.2f}" if dc == dc else "   -  "
