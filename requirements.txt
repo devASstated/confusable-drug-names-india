@@ -1,19 +1,59 @@
 # LASA confusable-drug-name screening — direct dependencies only.
 # Transitive deps (certifi, urllib3, six, python-dateutil, ...) are resolved
 # by pip and deliberately not pinned here. Do not regenerate with pip freeze.
+#
+# NOTE ON ML DEPENDENCIES:
+# The original versions used to train the Hindi-accent ByT5 model were not
+# recorded. The ML dependencies below are therefore intentionally unpinned
+# until the recovered training/inference pipeline is reproduced successfully.
+# Once verified, replace them with the exact known-working versions.
 
-# data handling — used by every pipeline stage
+# ---------------------------------------------------------------------------
+# Data handling — used across the pipeline
+# ---------------------------------------------------------------------------
 pandas==3.0.5
 numpy==2.5.1
 
-# string similarity + phonetic blocking keys — block.py, score.py, evaluate.py
+# ---------------------------------------------------------------------------
+# String similarity + orthographic/phonetic blocking
+# block.py, score.py, evaluate.py
+# ---------------------------------------------------------------------------
 jellyfish==1.2.1        # Jaro-Winkler, Levenshtein, NYSIIS, Soundex, Metaphone
 Metaphone==0.6          # doublemetaphone — block.py's 'dmeta' pass
 
-# ATC lookup via the RxNav / RxClass API — atc_coverage.py
+# ---------------------------------------------------------------------------
+# ATC lookup via the RxNav / RxClass API
+# atc_coverage.py
+# ---------------------------------------------------------------------------
 requests==2.34.2
 
-# required only by block_parameter_search.py (parameter-tuning experiment,
-# not part of the core pipeline)
+# ---------------------------------------------------------------------------
+# Parameter-search experiments
+# block_parameter_search.py
+# Not required by the core production blocker.
+# ---------------------------------------------------------------------------
 RapidFuzz==3.14.6
 phonetics==1.0.5
+
+# ---------------------------------------------------------------------------
+# Hindi-accent phoneme normalization — ByT5
+#
+# Training:
+#   train_accent_normalizer.py / historical fine_tune_2.py
+#
+# Inference:
+#   infer_accent_normalizer.py / historical convert.py
+#
+# Pipeline:
+#   aggregated_phoneme_results.csv
+#       -> fine-tuned google/byt5-small
+#       -> phones_compare.csv
+#       -> predicted_normalized_phonemes
+# ---------------------------------------------------------------------------
+
+scikit-learn             # train_test_split used during ByT5 training
+torch                    # model training and inference
+transformers             # ByT5 tokenizer/model + Seq2SeqTrainer
+datasets                 # Hugging Face Dataset used by training script
+accelerate               # backend required by Hugging Face Trainer
+safetensors              # Hugging Face model checkpoint serialization/loading
