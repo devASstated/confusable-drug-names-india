@@ -22,6 +22,22 @@ jellyfish==1.2.1        # Jaro-Winkler, Levenshtein, NYSIIS, Soundex, Metaphone
 Metaphone==0.6          # doublemetaphone — block.py's 'dmeta' pass
 
 # ---------------------------------------------------------------------------
+# Final candidate scoring
+# score_candidates.py
+#
+# Numba JIT-compiles the five scoring kernels and parallelizes them across
+# CPU cores. The NumPy fallback is functionally equivalent but substantially
+# slower and is intended primarily as a compatibility fallback.
+#
+# Production validation:
+#   2,244,989,057 candidate pairs
+#   5 scoring measures
+#   ~5.49M pairs/s
+#   6.8 min elapsed
+# ---------------------------------------------------------------------------
+numba==0.68.0
+
+# ---------------------------------------------------------------------------
 # ATC lookup via the RxNav / RxClass API
 # atc_coverage.py
 # ---------------------------------------------------------------------------
@@ -50,7 +66,6 @@ phonetics==1.0.5
 #       -> phones_compare.csv
 #       -> predicted_normalized_phonemes
 # ---------------------------------------------------------------------------
-
 scikit-learn             # train_test_split used during ByT5 training
 torch                    # model training and inference
 transformers             # ByT5 tokenizer/model + Seq2SeqTrainer
